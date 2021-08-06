@@ -1,0 +1,274 @@
+#! /bin/bash
+
+red="\e[0;91m"
+blue="\e[0;94m"
+yellow="\e[0;93m"
+expand_bg="\e[K"
+blue_bg="\e[0;104m${expand_bg}"
+red_bg="\e[0;101m${expand_bg}"
+green_bg="\e[0;102m${expand_bg}"
+green="\e[0;92m"
+white="\e[0;97m"
+bold="\e[1m"
+uline="\e[4m"
+reset="\e[0m"
+
+TMP_WHATMOUNT=/tmp/backmeup.whatmount
+RESTORE_SYSTEM=
+BACKUP_DRIVE= #/dev/sdd1
+ENCRYPTED_MAP_NAME= # MySamsungExternalHDD
+EXCLUDE_DIRS=( "/dev/" "/proc/" "/sys/" "/tmp/" "/run/" "/mnt/" "/lost+found" "/home/user/CustomFolder" )
+DTSNAME=
+
+trap closeumount INT
+
+if [[ $(id -u) -ne 0 ]]; then echo -e "${red}Root required.${reset}"; exit 1; fi
+
+
+function helpme() {
+
+        echo -e "${bold}$0${reset} helps you to make an encrypted backup with ${bold}rsync${reset}\n"
+        echo -e "\t${blue}-h${reset}, ${blue}--help${reset}\tShow this help message"
+        echo -e "\t${blue}-o${reset}, ${blue}--open-mount ${bold}/dev/sdX MountXAsName${reset}\n\t\t\tOpen device with cryptsetup (${red}passphrase needed${reset})\n\t\t\tand mount it to ${blue}/dev/mapper/${bold}MountXAsName${reset}"
+        echo -e "\t${blue}--status ${bold}[MountXAsName]${reset}\n\t\t\tShow status of device"
+        echo -e "\t${blue}-b${reset}, ${blue}--backup${reset}\tDo a backup (rsync -aAX) with exclude \n\t\t\tfolders specified as\n\t\t\t${yellow}${EXCLUDE_DIRS[*]}${reset}"
+        echo -e "\t${blue}-d${reset}, ${blue}--dry-run${reset}\tDry runs rsync"
+        echo -e "\t${blue}--restore ${bold}/dev/sdY /dev/sdX Backup.010197${reset}\n\t\t\tRestore files from backup (${uline}rsync -aAXh${reset})\n\t\t\trequiring disk (${uline}/dev/sdX${reset}) and\n\t\t\tbackup-no (${uline}Backup.010197${reset})\n\t\t\tfolder to be set"
+        echo -e "\t${blue}--erase ${bold}/dev/sdX${reset}\n\t\t\tErase /dev/sdX"
+        echo -e "\t${blue}--create ${bold}/dev/sdX MountXAsName${reset}\n\t\t\tCreate encrypted drive from ${blue}/dev/sdX${reset}\n\t\t\tand mount it as ${blue}${bold}MountXAsName${reset}"
+        echo -e "\t${blue}-c${reset}, ${blue}--close-umount ${bold}/dev/sdX MountXAsName${reset}\n\t\t\tUnmount the device (${uline}/dev/sdX${reset})\n\t\t\tand close it cryptsetup connection (${uline}MountXAsName${reset})"
+}
+
+function whatmount() {
+	if [[ -f $TMP_WHATMOUNT ]]; then
+		BACKUP_DRIVE=$(cat $TMP_WHATMOUNT | cut -d' ' -f1)
+		ENCRYPTED_MAP_NAME=$(cat $TMP_WHATMOUNT | cut -d' ' -f2)
+	else
+		echo "$TMP_WHATMOUNT not found. See <openmount>"
+		usage 1
+	fi	
+}
+
+function usage() {
+	local exit_code=0
+	if [ ! -z $1 ]; then exit_code=$1; fi;
+	helpme
+	exit $exit_code
+}
+
+function checkdrive() {
+	lsblk $1
+	if [ $? -ne 0 ]; then echo "No backup drive $1 found" ; exit 1; fi;
+}
+
+function makedstname() {
+	echo "Backup.`date +\"%d%m%y\"`"
+}
+
+function status() {
+	if [ ! -z "$1" ]; then 
+		ls -la /dev/mapper/$2
+        	cryptsetup -v status $2
+	elif [ -z $ENCRYPTED_MAP_NAME ]; then
+                whatmount
+		if [ -z $ENCRYPTED_MAP_NAME ]; then
+			echo "$0 -o | --openmount /dev/sdX MountXAsName"
+            usage 1
+		fi
+		ls -la /dev/mapper/$ENCRYPTED_MAP_NAME
+                cryptsetup -v status $ENCRYPTED_MAP_NAME
+	else
+		ls -la /dev/mapper/$ENCRYPTED_MAP_NAME
+		cryptsetup -v status $ENCRYPTED_MAP_NAME
+	fi
+}
+
+function openmount() {
+	if [ ! -z "$1" ] && [ ! -z "$2" ]; then 
+		echo "$1 $2" > $TMP_WHATMOUNT
+	else
+		echo "$0 -o | --openmount /dev/sdX MountXAsName"
+		usage 1
+	fi
+	whatmount
+	checkdrive $BACKUP_DRIVE
+
+	# Open & mount encrypted Backup Drive
+	# cryptsetup luksOpen $BACKUP_DRIVE $ENCRYPTED_MAP_NAME
+	cryptsetup open $BACKUP_DRIVE $ENCRYPTED_MAP_NAME
+
+	if [ ! -d /mnt/$ENCRYPTED_MAP_NAME ]; then mkdir -p /mnt/$ENCRYPTED_MAP_NAME ; fi;
+	mount -t ext4 /dev/mapper/$ENCRYPTED_MAP_NAME /mnt/$ENCRYPTED_MAP_NAME
+
+	if [ $? -eq 0 ]; then 
+		echo "/dev/mapper/$ENCRYPTED_MAP_NAME --> /mnt/$ENCRYPTED_MAP_NAME. Mount successfully.";
+		echo "$BACKUP_DRIVE $ENCRYPTED_MAP_NAME" > $TMP_WHATMOUNT
+	else 
+		echo "Failure when mount /dev/mapper/$ENCRYPTED_MAP_NAME --> /mnt/$ENCRYPTED_MAP_NAME"; fi;
+}
+
+function dst_src_backup() {
+	whatmount
+	DSTNAME=`makedstname`
+	SRCBACKUP=/
+	DSTBACKUP=/mnt/$ENCRYPTED_MAP_NAME/$DSTNAME
+}
+
+function prepare_backup() {
+	if [ -z $DSTBACKUP ]; then dst_src_backup ; fi
+	checkdrive $BACKUP_DRIVE
+	if [ -d $DSTBACKUP ]; then rm -rf $DSTBACKUP; fi;
+	mkdir -p $DSTBACKUP
+
+	# Backup procedure starts here
+	cd /
+	exclude_dirs=""
+	for i in ${EXCLUDE_DIRS[@]}; do
+		exclude_dirs="$exclude_dirs --exclude=$i*"
+	done;
+
+	echo "Exclude dirs: $exclude_dirs"
+}
+
+function backup_dryrun() {
+	prepare_backup
+	rsync -aAX --progress --dry-run --delete $exclude_dirs --exclude="swapfile" $SRCBACKUP $DSTBACKUP
+}
+
+function backup(){
+	prepare_backup
+	rsync -aAX --progress --delete $exclude_dirs $SRCBACKUP $DSTBACKUP
+}
+
+function restore() {
+	echo "restore NOT TESTED!"
+
+	RESTORED_DRIVE="$1"
+	if [ -z $RESTORED_DRIVE ]; then
+		echo "restore dest not set (/dev/sdX)";
+		echo "restore /dev/sdX from /dev/sdV/Backup.DATE. Example: /dev/sdx /dev/sdv Backup.010197";
+		exit 1; fi;
+
+	RESTORE_FROM="$2"
+	if [ -z $RESTORE_FROM ]; then
+		echo "restore src not set (/dev/sdV)";
+		echo "restore /dev/sdX from /dev/sdV/Backup.DATE. Example: /dev/sdx /dev/sdv Backup.010197";
+		exit 1; fi;
+
+	local backup_no="$3"
+	if [ -z $backup_no ]; then
+		echo "restore src backup not set (Backup.DATE)";
+		echo "restore /dev/sdX from /dev/sdV/Backup.DATE. Example: /dev/sdx /dev/sdv Backup.010197";
+		exit 2; fi;
+
+	local backup="backup"
+	local restore="system"
+	checkdrive $RESTORED_DRIVE
+	check_drive $RESTORE_FROM
+
+	cryptsetup open $RESTORE_FROM $backup
+	if [ ! -d "/mnt/$backup" ]; then
+		mkdir -p /mnt/$backup;
+	else umount /mnt/$backup 2>/dev/null
+	fi
+
+	mount -t ext4 $RESTORE_FROM /mnt/$backup
+
+	if [ ! -d /mnt/$restore ]; then mkdir -p /mnt/$restore; fi;
+	mount -t ext4 $RESTORED_DRIVE /mnt/$restore
+
+	rsync -aAXh --delete --exclude="lost+found" /dev/mapper/$backup/${backup_no}/ /mnt/$restore
+}
+
+function closeumount() {
+	if [ ! -z "$1" ] && [ ! -z "$2" ]; then 
+		BACKUP_DRIVE="$1"
+		ENCRYPTED_MAP_NAME="$2"
+	fi
+
+	if [ -z $BACKUP_DRIVE ] || [ -z $ENCRYPTED_MAP_NAME ]; then whatmount ; fi
+	
+	checkdrive $BACKUP_DRIVE
+	# Umount & close encrypted Backup Drive
+	if [[ ! -z `df -PTh | grep $ENCRYPTED_MAP_NAME` ]]; then umount /mnt/$ENCRYPTED_MAP_NAME; fi;
+	cryptsetup --verbose close $ENCRYPTED_MAP_NAME
+
+	if [[ -f $TMP_WHATMOUNT ]]; then rm -f $TMP_WHATMOUNT ; fi
+}
+
+function erase() {
+	BACKUP_DRIVE="$1"
+
+	if [ -z $BACKUP_DRIVE ]; then whatmount ; fi
+	checkdrive $BACKUP_DRIVE
+	umount $BACKUP_DRIVE
+	# WARNING!
+	# The whole data will be erased
+	read -r -n 1 -p "All data on $BACKUP_DRIVE will be erased. Continue? [y/n]: " REPLY
+	case $REPLY in
+    		[yY])
+			shred -vfz -n 7 $BACKUP_DRIVE
+			;;
+		[nN])
+			echo ;
+			return 1
+			;;
+	  	*) printf " \033[31m %s \n\033[0m" "invalid input"
+	esac
+}
+
+function createmount() {
+	local backup_drive="$1"
+	local backup_drive_name="$2"
+
+	checkdrive $backup_drive
+	echo "$backup_drive $backup_drive_name" > $TMP_WHATMOUNT
+
+	cryptsetup -v --type luks --cipher aes-xts-plain64 --key-size 256 --hash sha256 --verify-passphrase luksFormat $backup_drive
+	cryptsetup open $backup_drive $backup_drive_name
+	mkfs.ext4 $backup_drive
+
+	if [ ! -d /mnt/$backup_drive_name ]; then mkdir -p /mnt/$backup_drive_name ; fi;
+
+	mount -t ext4 /dev/mapper/$backup_drive_name /mnt/$backup_drive_name
+	if [ $? -eq 0 ]; then
+		echo "$backup_drive --> /mnt/$backup_drive_name mount successfully";
+	else
+		echo "Unable mount /dev/mapper/$backup_drive_name /mnt/$backup_drive_name"; fi;
+}
+
+
+case $1 in
+	-h | --help )
+		helpme; exit 0
+		;;
+	-o | --open-mount )
+		openmount $2 $3
+		;;
+	--status )
+		status $2
+		;;
+	-b | --backup )
+		backup
+		;;
+	-d | --dry-run )
+		backup_dryrun
+		;;
+	--restore )
+		restore $2 $3 $4
+		;;
+	--erase )
+		erase
+		;;
+	--create )
+		createmount $2 $3
+		;;
+	-c | --close-umount )
+		closeumount
+		;;
+	* )
+		if [[ -z "$1" ]]; then echo "Empty arg"; 
+		else echo "Unknown option: $1"; fi
+		usage 1
+esac
+

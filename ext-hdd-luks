@@ -1,0 +1,196 @@
+###########################
+# 1) Encrypt Drive with cryptsetup LUKS
+# 2) apply tune2fs to newly created space
+# 3) Check encrypted space with touch file and check it exists
+###########################
+
+red="\e[0;91m"
+blue="\e[0;94m"
+yellow="\e[0;93m"
+expand_bg="\e[K"
+blue_bg="\e[0;104m${expand_bg}"
+red_bg="\e[0;101m${expand_bg}"
+green_bg="\e[0;102m${expand_bg}"
+green="\e[0;92m"
+white="\e[0;97m"
+bold="\e[1m"
+uline="\e[4m"
+reset="\e[0m"
+
+DRIVE_TO_ENCRYPT=
+ENCRYPTED_MAP_DIR=/dev/mapper
+ENCRYPTED_MAP_NAME=
+
+function ctrl_c() {		
+	echo "Do if device left mounted:"
+	echo -e "\t> umount /dev/mapper/sdX"
+	echo -e "\t> cryptsetup luksClose sdX"
+	echo "Bye."
+	exit 2
+}
+
+trap ctrl_c INT
+
+function luks_help() {
+	echo -e "${white}cryptsetup ${yellow}help notes${reset}\n"
+	echo -e "  Open device with cryptsetup:"
+	echo -e "\t>> ${blue}cryptsetup luksOpen ${bold}/dev/sdX sdX${reset}"
+	echo -e "  Then mount it:"
+	echo -e "\t>> ${blue}mount ${bold}/dev/mapper/sdX /mnt/dir-to-mount${reset}"
+	echo -e "  Now you can use your device :)"
+	echo -e "  Don't forget to umount it after usage:"
+	echo -e "\t>> ${blue}umount ${bold}/dev/mapper/sdX${reset}"
+	echo -e "  And close properly with cryptsetup:"
+	echo -e "\t>> ${blue}cryptsetup ${bold}luksClose sdX${reset}"
+
+	exit 0
+}
+
+function help() {
+	echo -e "${bold}$0${reset} help you work with ${bold}luks${reset} encrypted drive\n"
+	echo -e "\t${blue}-h${reset}, ${blue}--help${reset}        \tShow this help message"
+	echo -e "\t    ${blue}--lukshelp${reset}        \tShow luks help message"
+	echo -e "\t${blue}-t${reset}, ${blue}--test${reset}        \tTest encrypted device \n\t\t\t\t(try to mount and create file)"
+	echo -e "\t${blue}-o${reset}, ${blue}--open${reset}        \tOpen device with cryptsetup \n\t\t\t\t(${red}passphrase needed${reset}) and mount it \n\t\t\t\tto ${blue}/dev/mapper/${bold}MountAsXName${reset}"
+	echo -e "\t${blue}-s${reset}, ${blue}--status${reset}      \tShow status of device"
+	echo -e "\t    ${blue}--create${reset}      \tCreate encrypted drive from ${blue}/dev/sdX${reset}"
+	echo -e "\t${blue}-c${reset}, ${blue}--close${reset}       \tUnmount the device and \n\t\t\t\tclose it cryptsetup connection\n"
+
+	echo -e "${yellow}${bold}Examples${reset}:"
+	echo -e "  $0 --open   /dev/sdX MyData	Opens the HDD for working with & mounts to /dev/mapper/MyData"
+	echo -e "  $0 --test   /dev/sdX MyData	Tests if everything set properly"
+	echo -e "  $0 --status /dev/sdX MyData	Checks the status of /dev/sdX mounted on /dev/mapper/MyData"
+	echo -e "  $0 --close  /dev/sdX MyData	Close connection & umount /dev/sdX from /dev/mapper/MyData"
+	echo -e "  $0 --create /dev/sdX NewData	! ${red}Be Careful Here${reset} ! This command creates \n\t\t\t\t\t${red}NEW LUKS FS${reset} on your drive (${red}/dev/sdX${reset})\n\t\t\t\t\t${yellow}Please, don't use it on HDD which Already has data.${reset}"
+
+	exit 0
+}
+
+function check_drive() {
+	echo "Check $DRIVE_TO_ENCRYPT ..."
+	lsblk $DRIVE_TO_ENCRYPT
+	if [ $? -ne 0 ]; then
+		echo " $DRIVE_TO_ENCRYPT not found"
+		exit 1
+	fi
+}
+
+function test_enc_drive() {
+	echo "Test your encrypted partition:"
+	local test_mountpoint="/mnt/${ENCRYPTED_MAP_NAME}-test"
+	echo "Mount to $test_mountpoint ..."
+	if [ ! -d $test_mountpoint ]; then mkdir -p $test_mountpoint ; fi
+	mount $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME $test_mountpoint
+	
+	if [ $? -eq 0 ]; then echo "Success."; else echo "Failure."; exit 1; fi;
+	echo "list dir $test_mountpoint ... "
+	ls -la $test_mountpoint
+
+	touch $test_mountpoint/testfile
+	if [ -f $test_mountpoint/testfile ]; then echo "Success."; rm -f $test_mountpoint/testfile
+	else echo "Failure." ; fi
+
+	umount $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME
+}
+
+function create_enc_drive() {
+	check_drive $DRIVE_TO_ENCRYPT
+
+	read -p "Drive $DRIVE_TO_ENCRYPT will be unmounted, formatted and encrypted! Continue?[YES/n] " Yn
+	if [ $Yn != "YES" ]; then echo "Bye."; exit 0; fi;
+
+	umount $DRIVE_TO_ENCRYPT
+	local umount_result=$?
+	if [ $umount_result -ne 0 ]; then
+		if [ $umount_result -ne 32 ]; then exit 1; fi; fi
+
+	echo "Encrypting $DRIVE_TO_ENCRYPT with cryptsetup ..."
+	cryptsetup --verbose --verify-passphrase luksFormat $DRIVE_TO_ENCRYPT 
+
+	echo "Open an encrypted partition as $ENCRYPTED_MAP_NAME"
+	cryptsetup --verbose luksOpen $DRIVE_TO_ENCRYPT $ENCRYPTED_MAP_NAME
+	fdisk -l
+
+	read -p "mkfs.ext4 will be used for $DRIVE_TO_ENCRYPT! Continue?[YES/n] " Yn
+	if [ $Yn != "YES" ]; then echo "Bye."; exit 0; fi;
+
+	echo "Creating ext4 fs on $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME ..."
+	mkfs.ext4 $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME
+
+	if [ $? -eq 0 ]; then echo "Success."; else echo "Failure."; exit 1; fi;
+
+	echo "Tune $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME with 0% reserved space ..."
+	tune2fs -m 0 $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME
+
+	if [ $? -eq 0 ]; then echo "Success."; else echo "Failure."; exit 1; fi;
+
+	test_enc_drive
+}
+
+function status_enc_drive() {
+	lsblk $DRIVE_TO_ENCRYPT
+	ls -la /dev/mapper/$ENCRYPTED_MAP_NAME
+	cryptsetup -v status $ENCRYPTED_MAP_NAME
+}
+
+function open_enc_drive() {
+	echo "Opening an encrypted partition as $ENCRYPTED_MAP_NAME ... "
+	cryptsetup --verbose luksOpen $DRIVE_TO_ENCRYPT $ENCRYPTED_MAP_NAME
+	if [ $? -eq 0 ]; then echo "success.";fdisk -l;
+	else echo "failure."; exit 1; fi
+}
+
+function close_enc_drive() {
+	umount $ENCRYPTED_MAP_DIR/$ENCRYPTED_MAP_NAME
+	echo "Device $ENCRYPTED_MAP_NAME will be closed (cryptsetup) ... "
+	cryptsetup luksClose $ENCRYPTED_MAP_NAME && echo -e "success.\nBye." || echo "failure."
+}
+
+case $1 in
+	-h | --help )
+		help
+		;;
+	-t | --test )
+		DRIVE_TO_ENCRYPT="$2"
+		ENCRYPTED_MAP_NAME="$3"
+		if [ -z $DRIVE_TO_ENCRYPT ]; then echo "Drive is not set"; exit 1; fi
+		if [ -z $ENCRYPTED_MAP_NAME ]; then echo "ENCRYPTED_MAP_NAME is not set; set it sa folder name enc_drive mounted to"; exit 1; fi
+		test_enc_drive
+		;;
+	--lukshelp )
+		luks_help
+		;;
+	-o | --open )
+		DRIVE_TO_ENCRYPT="$2"
+		ENCRYPTED_MAP_NAME="$3"
+		if [ -z $DRIVE_TO_ENCRYPT ]; then echo "Drive is not set"; exit 1; fi
+		if [ -z $ENCRYPTED_MAP_NAME ]; then echo "ENCRYPTED_MAP_NAME is not set; set it sa folder name enc_drive mounted to"; exit 1; fi
+		open_enc_drive
+		;;
+	-s | --status )
+		DRIVE_TO_ENCRYPT="$2"
+		ENCRYPTED_MAP_NAME="$3"
+		if [ -z $DRIVE_TO_ENCRYPT ]; then echo "Drive is not set"; exit 1; fi
+		if [ -z $ENCRYPTED_MAP_NAME ]; then echo "ENCRYPTED_MAP_NAME is not set; set it sa folder name enc_drive mounted to"; exit 1; fi
+		status_enc_drive
+		;;
+	--create )
+		DRIVE_TO_ENCRYPT="$2"
+		ENCRYPTED_MAP_NAME="$3"
+		if [ -z $DRIVE_TO_ENCRYPT ]; then echo "Drive to encrypt is not set"; exit 1; fi
+		if [ -z $ENCRYPTED_MAP_NAME ]; then echo "ENCRYPTED_MAP_NAME is not set; set it sa folder name enc_drive mounted to"; exit 1; fi
+		create_enc_drive
+		;;
+	-c | --close )
+		DRIVE_TO_ENCRYPT="$2"
+		ENCRYPTED_MAP_NAME="$3"
+		if [ -z $DRIVE_TO_ENCRYPT ]; then echo "Drive is not set"; exit 1; fi
+		if [ -z $ENCRYPTED_MAP_NAME ]; then echo "ENCRYPTED_MAP_NAME is not set; set it sa folder name enc_drive mounted to"; exit 1; fi
+		close_enc_drive
+		;;
+	* )
+		echo "Unknown option: $1"; exit 1;
+esac
+
+
+
